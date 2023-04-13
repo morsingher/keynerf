@@ -6,6 +6,8 @@ import numpy as np
 import cv2
 from ortools.linear_solver import pywraplp
 
+from visualize_poses import visualize_poses, generate_gif
+
 def flip_axes(pose):
 
     flip_yz = np.eye(4)
@@ -157,6 +159,7 @@ if __name__ == '__main__':
                 selected_cams.append(i)
         print(f'Selected {int(solver.Objective().Value())} cameras as initialization: {selected_cams}')
         print(f'Solution computed in {time.time() - begin_ilp} s')
+        num_opt = len(selected_cams)
     else:
         print('Failed to find a solution!')
 
@@ -184,7 +187,18 @@ if __name__ == '__main__':
 
     # Save the result
 
-    with open(os.path.join(args.input_dir, 'view_selection.txt'), 'w') as f:
+    final_path = os.path.join(args.input_dir, 'view_selection.txt')
+    with open(final_path, 'w') as f:
         f.writelines(['{}\n'.format(idx) for idx in selected_cams])
     print('===============================')
     print(f'Done! The whole algorithm completed in {time.time() - begin} s')
+
+    print('Generating GIF for visualization...')
+    gif_path = os.path.join(args.input_dir, 'gif')
+    os.makedirs(gif_path, exist_ok = True)
+    generate_gif(
+        poses, num_opt, 
+        final_path, gif_path,
+        args.grid_min, args.grid_max, args.grid_res // 2
+    )
+    print('Done!')
