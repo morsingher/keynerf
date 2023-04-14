@@ -6,81 +6,10 @@ import numpy as np
 import cv2
 from ortools.linear_solver import pywraplp
 
-from visualize_poses import visualize_poses, generate_gif
-
-def flip_axes(pose):
-
-    flip_yz = np.eye(4)
-    flip_yz[1, 1] = -1
-    flip_yz[2, 2] = -1
-    return pose @ flip_yz
-
-def read_poses(meta):
-
-    poses = []
-    for frame in meta['frames']:
-        poses.append(flip_axes(np.array(frame['transform_matrix'])))
-    return np.array(poses)
-
-def read_calibration(meta, path):
-    
-    frame = meta['frames'][0]
-    img_path = os.path.join(path, frame['file_path'] + '.png')
-    img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-    H, W = img.shape[:2]
-    focal = .5 * W / np.tan(.5 * float(meta['camera_angle_x']))
-    K = np.array([
-        [focal, 0, 0.5 * W],
-        [0, focal, 0.5 * H],
-        [0, 0, 1]
-    ])
-    return K
-
-def get_3d_grid(bbox_min, bbox_max, grid_res):
-
-    t_x = np.linspace(bbox_min[0], bbox_max[0], grid_res)
-    t_y = np.linspace(bbox_min[1], bbox_max[1], grid_res)
-    t_z = np.linspace(bbox_min[2], bbox_max[2], grid_res)
-    pts = np.stack(np.meshgrid(t_x, t_y, t_z), -1).astype(np.float32)
-    return pts.reshape([-1, 3])
-
-def project_pts_to_cam(pts, c2w, K):
-
-    w2c = np.linalg.inv(c2w)
-    R, t = w2c[:3,:3], w2c[:3,3]
-    cam_pts = K @ (R @ pts.T + t[:, np.newaxis])
-
-    depth = cam_pts[2,:]
-    pix_pts = cam_pts[:2,:] / depth
-    u, v = pix_pts[0,:], pix_pts[1,:]
-
-    H, W = (2. * K[1,2]).astype(np.int32), (2. * K[0,2]).astype(np.int32)
-    u_valid = (u > 0) & (u < H)
-    v_valid = (v > 0) & (v < W)
-    z_valid = (depth > 0)
-    mask = u_valid & v_valid & z_valid
-
-    return u, v, mask
-
-def check_symmetric(mat, rtol = 1e-05, atol = 1e-08):
-    return np.allclose(mat, mat.T, rtol = rtol, atol = atol)
-
-def compute_view_matrix(poses):
-
-    view_dirs = np.zeros((len(poses), 3))
-    for i, pose in enumerate(poses):
-        d = np.array([0.,0.,1.]) @ pose[:3, :3].T
-        view_dirs[i, :] = d / np.linalg.norm(d)
-
-    view_matrix = np.zeros((len(poses), len(poses)))
-    for i in range(len(poses)):
-        for j in range(i + 1, len(poses)):
-            p = np.arccos(np.dot(view_dirs[i], view_dirs[j]))
-            view_matrix[i, j] = p
-            view_matrix[j, i] = p
-
-    assert check_symmetric(view_matrix)
-    return view_matrix
+from utils.camera_visualizer import generate_gif
+from utils.misc import project_pts_to_cam, check_symmetric, compute_view_matrix
+from utils.blender import get_blender_poses, get_blender_calibration, get_blender_grid
+from utils.colmap import get_colmap_poses, get_colmap_calibration, get_colmap_grid
 
 if __name__ == '__main__':
 
@@ -88,22 +17,29 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_dir", type = str, required = True)
-    parser.add_argument("--grid_min", type = float, default = -1.6)
-    parser.add_argument("--grid_max", type = float, default = 1.6)
+    parser.add_argument("--dataset", type = str, default = "blender")
     parser.add_argument("--grid_res", type = int, default = 16)
+    parser.add_argument("--scale", type = float, default = 1.0)
+    parser.add_argument("--gif", action = "store_true")
     args = parser.parse_args()
 
-    begin = time.time()
+    assert args.dataset in ["blender", "colmap"]
 
     # Load input data
 
-    file_path = os.path.join(args.input_dir, 'transforms_train.json')
-    with open(file_path, 'r') as f:
-        meta = json.load(f)
-    poses = read_poses(meta)
-    K = read_calibration(meta, args.input_dir)
+    if args.dataset == "blender":
+        file_path = os.path.join(args.input_dir, 'transforms_train.json')
+        with open(file_path, 'r') as f:
+            meta = json.load(f)
+        poses = get_blender_poses(meta)
+        K = get_blender_calibration(meta, args.input_dir)
+        idxs_train = [i for i in range(poses.shape[0])]
+    else:
+        poses, idxs_train = get_colmap_poses(args.input_dir)
+        K = get_colmap_calibration(args.input_dir)
+
     num_poses = poses.shape[0]
-    print(f'Read input poses with shape {poses.shape} and calibration with shape {K.shape}')
+    print(f'Read input poses with shape {poses.shape} and calibration with shape {K.shape}')  
 
     print('===============================')
     print('STEP 1 - INTEGER OPTIMIZATION')
@@ -111,9 +47,16 @@ if __name__ == '__main__':
 
     # Generate a 3D uniform grid to approximate the scene 
 
-    pts = get_3d_grid([args.grid_min] * 3, [args.grid_max] * 3, args.grid_res) # [num_pts, 3]
+    if args.dataset == "blender":
+        pts, grid_min, grid_max = get_blender_grid(args.grid_res)
+    else:
+        pts, grid_min, grid_max = get_colmap_grid(args.input_dir, args.grid_res)
+
+    pts *= args.scale
     num_pts = pts.shape[0]
-    print(f'Generated uniform grid with {num_pts} points')
+    print(f'Generated uniform grid with {num_pts} points and bounds ({grid_min}, {grid_max})')
+
+    begin = time.time()
 
     # Build the matrix A: which point is seen by which camera?
 
@@ -162,6 +105,7 @@ if __name__ == '__main__':
         num_opt = len(selected_cams)
     else:
         print('Failed to find a solution!')
+        exit()
 
     print('===============================')
     print('STEP 2 - GREEDY SCHEDULING')
@@ -189,16 +133,17 @@ if __name__ == '__main__':
 
     final_path = os.path.join(args.input_dir, 'view_selection.txt')
     with open(final_path, 'w') as f:
-        f.writelines(['{}\n'.format(idx) for idx in selected_cams])
+        f.writelines(['{}\n'.format(idxs_train[idx]) for idx in selected_cams])
     print('===============================')
     print(f'Done! The whole algorithm completed in {time.time() - begin} s')
 
-    print('Generating GIF for visualization...')
-    gif_path = os.path.join(args.input_dir, 'gif')
-    os.makedirs(gif_path, exist_ok = True)
-    generate_gif(
-        poses, num_opt, 
-        final_path, gif_path,
-        args.grid_min, args.grid_max, args.grid_res // 2
-    )
-    print('Done!')
+    if args.gif:
+        print('Generating GIF for visualization...')
+        gif_path = os.path.join(args.input_dir, 'gif')
+        os.makedirs(gif_path, exist_ok = True)
+        generate_gif(
+            poses, num_opt, 
+            selected_cams, gif_path,
+            grid_min, grid_max, args.grid_res // 2
+        )
+        print('Done!')

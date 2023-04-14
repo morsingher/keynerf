@@ -9,6 +9,8 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import cv2
 import imageio
 
+from utils.misc import flip_axes
+
 class CameraPoseVisualizer:
     
     def __init__(self, xlim, ylim, zlim):
@@ -59,13 +61,6 @@ class CameraPoseVisualizer:
     def save(self, path):
         plt.savefig(path)
 
-def flip_axes(pose):
-
-    flip_yz = np.eye(4)
-    flip_yz[1, 1] = -1
-    flip_yz[2, 2] = -1
-    return pose @ flip_yz
-
 def visualize_poses(poses, grid_min, grid_max, grid_res, path = None):
 
     t_arr = np.array([pose[:3,-1] for pose in poses])
@@ -76,7 +71,7 @@ def visualize_poses(poses, grid_min, grid_max, grid_res, path = None):
         [mins[1] - 1, maxs[1] + 1], 
         [mins[2] - 1, maxs[2] + 1]
     )
-    visualizer.add_3d_cube(grid_min, grid_max, grid_res)
+    visualizer.add_3d_bbox(grid_min, grid_max, grid_res)
     for pose in poses:
         visualizer.add_pose(flip_axes(pose), 'c', 1)
 
@@ -85,11 +80,8 @@ def visualize_poses(poses, grid_min, grid_max, grid_res, path = None):
     else:
         visualizer.show()
 
-def generate_gif(poses, num_opt, path_in, path_out, grid_min, grid_max, grid_res):
+def generate_gif(poses, num_opt, idxs, path_out, grid_min, grid_max, grid_res):
     
-    with open(path_in, 'r') as f:
-        idxs = [int(line.strip()) for line in f]
-
     init_path = os.path.join(path_out, 'init_poses.png')
     visualize_poses(poses[idxs[:num_opt]], grid_min, grid_max, grid_res, init_path)
     frames_tmp = [cv2.imread(init_path)]
@@ -103,7 +95,7 @@ def generate_gif(poses, num_opt, path_in, path_out, grid_min, grid_max, grid_res
             [mins[1] - 1, maxs[1] + 1], 
             [mins[2] - 1, maxs[2] + 1]
         )
-        visualizer.add_3d_cube(grid_min, grid_max, grid_res)
+        visualizer.add_3d_bbox(grid_min, grid_max, grid_res)
         cur_poses = poses[idxs[:idx + 1]]
         for pose in cur_poses[:-1]:
             visualizer.add_pose(flip_axes(pose), 'c', 1)

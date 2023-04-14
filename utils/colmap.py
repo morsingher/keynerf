@@ -3,7 +3,8 @@ import sys
 import collections
 import numpy as np
 import struct
-
+import cv2
+import open3d as o3d
 
 CameraModel = collections.namedtuple(
     "CameraModel", ["model_id", "model_name", "num_params"])
@@ -263,3 +264,97 @@ def rotmat2qvec(R):
     if qvec[0] < 0:
         qvec *= -1
     return qvec
+
+def get_colmap_pose(img):
+
+    w2c = np.eye(4)
+    w2c[:3, :3] = img.qvec2rotmat()
+    w2c[:3, 3] = img.tvec
+    c2w = np.linalg.inv(w2c)
+
+    return c2w.astype(np.float32)
+
+def get_colmap_keypoints(input_dir):
+
+    img_dir = os.path.join(input_dir, 'images')
+    mask_dir = os.path.join(input_dir, 'masks')
+    sparse_dir = os.path.join(input_dir, 'sparse/0')
+    assert os.path.exists(img_dir) and os.path.exists(sparse_dir) and os.path.exists(mask_dir)
+
+    _, images, pts = read_model(sparse_dir, '.bin')
+    keypoints = []
+
+    for id_im in range(1, len(images) + 1):
+        
+        mask_path = os.path.join(mask_dir, os.path.splitext(images[id_im].name)[0] + '.png')
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        
+        for id_kp in range(len(images[id_im].xys)):
+
+            id_3D = images[id_im].point3D_ids[id_kp]
+            point2D = images[id_im].xys[id_kp] # Pixel coordinates
+            u, v = int(point2D[1]), int(point2D[0])
+            if mask[u, v] > 250 and id_3D >= 0:
+                point3D = pts[id_3D].xyz # Corresponding 3D coordinates
+                keypoints.append(point3D)
+
+    return np.unique(np.array(keypoints), axis = 0)
+
+def get_colmap_poses(input_dir):
+
+    img_dir = os.path.join(input_dir, 'images')
+    sparse_dir = os.path.join(input_dir, 'sparse/0')
+    assert os.path.exists(img_dir) and os.path.exists(sparse_dir)
+
+    cameras, images_col, points3D = read_model(sparse_dir, '.bin')
+    num_images = len(images_col)
+
+    # Images and poses
+
+    poses = np.zeros((num_images, 4, 4))
+    filenames = [None] * num_images
+    for img in images_col.values():
+        path = os.path.join(img_dir, img.name)
+        poses[img.id - 1] = get_colmap_pose(img)
+        filenames[img.id - 1] = path
+
+    # Fix sorting problem of COLMAP
+
+    sort_idx = [i[0] for i in sorted(enumerate(filenames), key = lambda x : x[1])]
+    poses = poses[sort_idx]
+    idxs_train = [i for i in range(num_images)][::2]
+
+    return poses[idxs_train], idxs_train
+
+def get_colmap_calibration(input_dir):
+    
+    sparse_dir = os.path.join(input_dir, 'sparse/0')
+    cameras, _, _ = read_model(sparse_dir, '.bin')
+    cam = list(cameras.values())[0]
+    H, W, focal = cam.height, cam.width, cam.params[0]
+    K = np.array([
+        [focal, 0, 0.5 * W],
+        [0, focal, 0.5 * H],
+        [0, 0, 1]
+    ])
+    
+    return K
+
+def get_colmap_grid(input_dir, res):
+
+    keypoints = get_colmap_keypoints(input_dir)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(keypoints)
+    pcd_filt, _ = pcd.remove_statistical_outlier(
+        nb_neighbors = 100, 
+        std_ratio = 2.0
+    )
+
+    xyz = np.array(pcd_filt.points)
+    grid_min, grid_max = xyz.min(axis = 0), xyz.max(axis = 0)
+    t_x = np.linspace(grid_min[0], grid_max[0], res)
+    t_y = np.linspace(grid_min[1], grid_max[1], res)
+    t_z = np.linspace(grid_min[2], grid_max[2], res)
+    pts = np.stack(np.meshgrid(t_x, t_y, t_z), -1).astype(np.float32)
+
+    return pts.reshape([-1, 3]), grid_min, grid_max
